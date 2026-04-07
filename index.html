@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pembaca Dokumen</title>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f7f6;
+            color: #333;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 { text-align: center; color: #2c3e50; }
+        .controls-container {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            justify-content: center;
+        }
+        button, select, input[type="file"] {
+            padding: 10px 15px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            font-size: 14px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        button { background-color: #3498db; color: white; border: none; transition: 0.3s;}
+        button:hover { background-color: #2980b9; }
+        button:disabled { background-color: #bdc3c7; cursor: not-allowed; }
+        
+        /* Warna khusus untuk tombol kontrol baca */
+        #btnStop { background-color: #e74c3c; }
+        #btnStop:hover { background-color: #c0392b; }
+        #btnPause { background-color: #f39c12; }
+        #btnPause:hover { background-color: #d35400; }
+
+        .status-bar {
+            text-align: center;
+            font-weight: bold;
+            color: #d35400;
+            margin-bottom: 10px;
+        }
+        .viewer-container {
+            display: flex;
+            gap: 20px;
+        }
+        .canvas-container {
+            flex: 1;
+            background: white;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 10px;
+            overflow: auto;
+        }
+        canvas { max-width: 100%; height: auto; border: 1px solid #ddd; }
+        .text-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        textarea {
+            flex: 1;
+            width: 100%;
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+            resize: none;
+            font-size: 16px;
+            line-height: 1.5;
+            min-height: 400px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Asisten Pembaca Dokumen Digital</h1>
+
+    <div class="controls-container">
+        <input type="file" id="fileInput" accept="application/pdf">
+        
+        <select id="voiceSelect">
+            <option value="">Memuat Suara...</option>
+        </select>
+
+        <button id="btnPrev" disabled>&#8592; Mundur</button>
+        <span id="pageInfo">Hal: <span id="pageNum">0</span> / <span id="pageCount">0</span></span>
+        <button id="btnNext" disabled>Maju &#8594;</button>
+
+        <button id="btnPlay" disabled>Mulai Baca</button>
+        <button id="btnPause" disabled>Jeda</button>
+        <button id="btnStop" disabled>Berhenti</button>
+
+        <label>
+            <input type="checkbox" id="autoRead"> Baca Otomatis
+        </label>
+    </div>
+
+    <div class="status-bar" id="statusText">Pilih file PDF untuk memulai.</div>
+
+    <div class="viewer-container">
+        <div class="canvas-container">
+            <canvas id="pdfCanvas"></canvas>
+        </div>
+        <div class="text-container">
+            <textarea id="extractedText" placeholder="Teks yang terdeteksi akan muncul di sini..." readonly></textarea>
+        </div>
+    </div>
+
+    <script>
+        // Konfigurasi PDF.js
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+        let pdfDoc = null,
+            pageNum = 1,
+            pageRendering = false,
+            pageNumPending = null,
+            canvas = document.getElementById('pdfCanvas'),
+            ctx = canvas.getContext('2d'),
+            currentText = "",
+            voices = [];
+
+        // Elemen UI
+        const fileInput = document.getElementById('fileInput');
+        const statusText = document.getElementById('statusText');
+        const extractedTextArea = document.getElementById('extractedText');
+        const btnPrev = document.getElementById('btnPrev');
+        const btnNext = document.getElementById('btnNext');
+        const btnPlay = document.getElementById('btnPlay');
+        const btnPause = document.getElementById('btnPause');
+        const btnStop = document.getElementById('btnStop');
+        const voiceSelect = document.getElementById('voiceSelect');
+        const autoReadCheckbox = document.getElementById('autoRead');
+
+        // --- MANAJEMEN SUARA (TTS) ---
+        function populateVoiceList() {
+            voices = speechSynthesis.getVoices().filter(voice => voice.lang.includes('id'));
+            voiceSelect.innerHTML = '';
+            if (voices.length === 0) {
+                voiceSelect.innerHTML = '<option>Suara Bahasa Indonesia tidak ditemukan</option>';
+            } else {
+                voices.forEach((voice, i) => {
+                    let genderHint = voice.name.toLowerCase().includes('gadis') ? '(Wanita)' : 
+                                     voice.name.toLowerCase().includes('andika') ? '(Pria)' : '';
+                    const option = document.createElement('option');
+                    option.textContent = `${voice.name} ${genderHint}`;
+                    option.value = i;
+                    voiceSelect.appendChild(option);
+                });
+            }
+        }
+
+        populateVoiceList();
+        if (speechSynthesis.onvoiceschanged !== undefined) {
+            speechSynthesis.onvoiceschanged = populateVoiceList;
+        }
+
+        function speakText(text) {
+            speechSynthesis.cancel(); // Hentikan suara sebelumnya
+            btnPause.textContent = "Jeda"; // Reset teks tombol jeda
+            
+            if (text.trim() === '') return;
+
+            const utterance = new SpeechSynthesisUtterance(text);
+            const selectedVoiceIndex = voiceSelect.value;
+            if (voices[selectedVoiceIndex]) {
+                utterance.voice = voices[selectedVoiceIndex];
+            }
+            utterance.lang = 'id-ID';
+            utterance.rate = 0.9;
+
+            utterance.onend = function() {
+                btnPause.textContent = "Jeda";
+                if (autoReadCheckbox.checked && pageNum < pdfDoc.numPages) {
+                    onNextPage();
+                }
+            };
+
+            speechSynthesis.speak(utterance);
+        }
+
+        // --- MANAJEMEN PDF & OCR ---
+        fileInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file.type !== 'application/pdf') {
+                alert('Tolong unggah file PDF.');
+                return;
+            }
+            const fileReader = new FileReader();
+            fileReader.onload = function() {
+                const typedarray = new Uint8Array(this.result);
+                statusText.textContent = "Memuat PDF...";
+                pdfjsLib.getDocument(typedarray).promise.then(pdf => {
+                    pdfDoc = pdf;
+                    document.getElementById('pageCount').textContent = pdf.numPages;
+                    pageNum = 1;
+                    renderPage(pageNum);
+                    
+                    // Aktifkan tombol-tombol
+                    btnPrev.disabled = false;
+                    btnNext.disabled = false;
+                    btnPlay.disabled = false;
+                    btnPause.disabled = false;
+                    btnStop.disabled = false;
+                });
+            };
+            fileReader.readAsArrayBuffer(file);
+        });
+
+        function renderPage(num) {
+            pageRendering = true;
+            speechSynthesis.cancel(); 
+            btnPause.textContent = "Jeda"; // Reset tombol jeda saat ganti halaman
+            
+            pdfDoc.getPage(num).then(page => {
+                const viewport = page.getViewport({scale: 1.5});
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+
+                const renderContext = { canvasContext: ctx, viewport: viewport };
+                const renderTask = page.render(renderContext);
+
+                renderTask.promise.then(() => {
+                    pageRendering = false;
+                    if (pageNumPending !== null) {
+                        renderPage(pageNumPending);
+                        pageNumPending = null;
+                    } else {
+                        extractTextFromPage(page);
+                    }
+                });
+            });
+            document.getElementById('pageNum').textContent = num;
+        }
+
+        async function extractTextFromPage(page) {
+            statusText.textContent = "Mengekstrak teks digital...";
+            const textContent = await page.getTextContent();
+            let text = textContent.items.map(item => item.str).join(' ');
+
+            if (text.trim().length < 50) {
+                statusText.textContent = "Mendeteksi hasil scan. Menjalankan OCR... Mohon tunggu.";
+                Tesseract.recognize(
+                    canvas,
+                    'ind', 
+                    { logger: m => { if(m.status === 'recognizing text') statusText.textContent = `OCR: ${Math.round(m.progress * 100)}%`; } }
+                ).then(({ data: { text: ocrText } }) => {
+                    currentText = ocrText;
+                    extractedTextArea.value = currentText;
+                    statusText.textContent = "Siap dibaca.";
+                    if(autoReadCheckbox.checked) speakText(currentText);
+                });
+            } else {
+                currentText = text;
+                extractedTextArea.value = currentText;
+                statusText.textContent = "Siap dibaca.";
+                if(autoReadCheckbox.checked) speakText(currentText);
+            }
+        }
+
+        function queueRenderPage(num) {
+            if (pageRendering) {
+                pageNumPending = num;
+            } else {
+                renderPage(num);
+            }
+        }
+
+        function onPrevPage() {
+            if (pageNum <= 1) return;
+            pageNum--;
+            queueRenderPage(pageNum);
+        }
+
+        function onNextPage() {
+            if (pageNum >= pdfDoc.numPages) return;
+            pageNum++;
+            queueRenderPage(pageNum);
+        }
+
+        // --- EVENT LISTENERS UI ---
+        btnPrev.addEventListener('click', onPrevPage);
+        btnNext.addEventListener('click', onNextPage);
+        
+        btnPlay.addEventListener('click', () => {
+            speakText(currentText);
+        });
+
+        // Event Listener untuk Tombol Jeda/Lanjut
+        btnPause.addEventListener('click', () => {
+            if (speechSynthesis.speaking) {
+                if (speechSynthesis.paused) {
+                    speechSynthesis.resume();
+                    btnPause.textContent = "Jeda";
+                } else {
+                    speechSynthesis.pause();
+                    btnPause.textContent = "Lanjut";
+                }
+            }
+        });
+
+        btnStop.addEventListener('click', () => {
+            speechSynthesis.cancel();
+            autoReadCheckbox.checked = false;
+            btnPause.textContent = "Jeda"; // Kembalikan teks ke awal saat berhenti
+        });
+
+    </script>
+</body>
+<footer>
+        <p  align="center">2026 - Program Studi S1 Sistem Informasi FMIPA Untan.</p>
+</footer>
+</html>
